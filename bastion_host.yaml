@@ -10,14 +10,28 @@
     - name: Install Ansible using pip
       ansible.builtin.command: sudo pip3 install ansible
 
+    - name: Install Docker Collection using ansible-galaxy
+      ansible.builtin.command: /usr/local/bin/ansible-galaxy collection install community.docker
+
     - name: Install Git
       ansible.builtin.yum:
         name: git
         state: present
 
-    - name: Clone Playbook Repository
-      ansible.builtin.git:
-        repo: 'https://your-repository-url.git'
-        dest: '/path/to/your/playbooks'
-        clone: true
-        update: true
+    - name: Create a directory for playbooks
+      ansible.builtin.file:
+        path: '/home/ec2-user/playbooks'
+        state: directory
+        mode: '0755'
+
+    - name: Copy inventory file to bastion host
+      ansible.builtin.copy:
+        src: inventory.ini
+        dest: /home/ec2-user/playbooks/inventory.ini
+        mode: '0644'
+
+    - name: Copy playbook files to bastion host
+      ansible.builtin.copy:
+        src: infra.yaml
+        dest: /home/ec2-user/playbooks/infra.yaml
+        mode: '0644'
