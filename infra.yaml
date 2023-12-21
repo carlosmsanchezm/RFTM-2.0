@@ -1,0 +1,58 @@
+- name: Prepare Environment on Amazon Linux 2 Instances
+  hosts: all
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Install Python if not present
+      ansible.builtin.raw: test -e /usr/bin/python || (sudo yum -y update && sudo yum -y install python3)
+      changed_when: false
+
+    - name: Install Docker on Amazon Linux 2
+      ansible.builtin.yum:
+        name: docker
+        state: present
+        update_cache: true
+
+    - name: Start and enable Docker service
+      ansible.builtin.service:
+        name: docker
+        state: started
+        enabled: true
+
+- name: Deploy DVWA Container on DVWA Instance
+  hosts: dvwa_instance
+  become: true
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Pull and run DVWA Docker image
+      community.docker.docker_container:
+        name: dvwa
+        image: vulnerables/web-dvwa
+        state: started
+        published_ports:
+          - "80:80"
+
+- name: Deploy MySQL Container on MySQL Instance
+  hosts: mysql_instance
+  become: true
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+  tasks:
+    - name: Pull and run MySQL Docker image
+      community.docker.docker_container:
+        name: mysql
+        image: mysql:5.6
+        state: started
+        env:
+          MYSQL_ROOT_PASSWORD: "yourpassword"
+          MYSQL_DATABASE: dvwa
+        published_ports:
+          - "3306:3306"
+        volumes:
+          - mysql_data:/var/lib/mysql
+
+- name: Create MySQL data volume
+  community.docker.docker_volume:
+    volume_name: mysql_data
+    state: present

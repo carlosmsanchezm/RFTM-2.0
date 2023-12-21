@@ -1,0 +1,12 @@
+[bastion_group]
+bastion ansible_host=${bastion_host_public_ip} ansible_user=ec2-user
+
+[dvwa_group]
+%{ for ip in dvwa_public_ips ~}
+dvwa ansible_host=${ip} ansible_user=ec2-user
+%{ endfor ~}
+
+[mysql_group]
+%{ for ip in mysql_private_ips ~}
+mysql ansible_host=${ip} ansible_user=ec2-user
+%{ endfor ~}

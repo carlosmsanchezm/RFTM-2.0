@@ -1,0 +1,23 @@
+- name: Setup Bastion Host
+  hosts: bastion_group
+  gather_facts: false
+  become: true
+  tasks:
+    - name: Install Python if not present
+      ansible.builtin.raw: sudo yum -y install python3 python3-pip
+      changed_when: false
+
+    - name: Install Ansible using pip
+      ansible.builtin.command: sudo pip3 install ansible
+
+    - name: Install Git
+      ansible.builtin.yum:
+        name: git
+        state: present
+
+    - name: Clone Playbook Repository
+      ansible.builtin.git:
+        repo: 'https://your-repository-url.git'
+        dest: '/path/to/your/playbooks'
+        clone: true
+        update: true
