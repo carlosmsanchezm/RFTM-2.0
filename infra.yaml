@@ -1,13 +1,43 @@
+- name: Add SSH keys of remote hosts to known_hosts
+  hosts: mysql_group,dvwa_group
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Ensure known_hosts file exists
+      ansible.builtin.file:
+        path: /home/ec2-user/.ssh/known_hosts
+        state: touch
+        mode: '0644'
+        owner: ec2-user
+        group: ec2-user
+
+    - name: Scan for SSH keys of remote hosts
+      ansible.builtin.command:
+        cmd: ssh-keyscan -H {{ ansible_host }}
+      register: ssh_keyscan_result
+      changed_when: false
+
+    - name: Add SSH keys to known_hosts
+      ansible.builtin.lineinfile:
+        path: "~/.ssh/known_hosts"
+        line: "{{ ssh_keyscan_result.stdout }}"
+        create: false
+        mode: '0644'
+      when: ssh_keyscan_result.stdout is defined
+      changed_when: false
+
 - name: Prepare Environment on Amazon Linux 2 Instances
   hosts: all
   gather_facts: false
   become: true
   tasks:
-    - name: Install Python if not present
-      ansible.builtin.raw: test -e /usr/bin/python || (sudo yum -y update && sudo yum -y install python3)
+
+    - name: Install Python and pip
+      ansible.builtin.raw: sudo yum -y install python3 python3-pip
       changed_when: false
 
-    - name: Install Docker on Amazon Linux 2
+
+    - name: Install Docker
       ansible.builtin.yum:
         name: docker
         state: present
@@ -19,26 +49,82 @@
         state: started
         enabled: true
 
+    - name: Install a compatible version of Docker SDK for Python
+      ansible.builtin.pip:
+        name: docker==4.4.4
+        state: present
+        executable: pip3
+
 - name: Deploy DVWA Container on DVWA Instance
-  hosts: dvwa_instance
+  hosts: dvwa_group
   become: true
   vars:
     ansible_python_interpreter: /usr/bin/python3
   tasks:
-    - name: Pull and run DVWA Docker image
+
+    - name: Create config directory for DVWA
+      ansible.builtin.file:
+        path: /home/ec2-user
+        state: directory
+        mode: '0755'
+
+    - name: Ensure Python Pip is installed
+      ansible.builtin.package:
+        name: python3-pip
+        state: present
+
+    - name: Install urllib3 using pip
+      ansible.builtin.pip:
+        name: urllib3
+        executable: pip3
+
+    - name: Update AWS CLI
+      ansible.builtin.command: sudo pip3 install --upgrade awscli
+
+    - name: Configure AWS CloudWatch Logs agent
+      ansible.builtin.command: sudo aws logs create-log-group --log-group-name dvwa-logs
+      register: log_group_creation
+      failed_when: "'ResourceAlreadyExistsException' not in log_group_creation.stderr"
+      changed_when: "'ResourceAlreadyExistsException' in log_group_creation.stderr"
+
+    - name: Pull and run DVWA Docker image with awslogs
       community.docker.docker_container:
         name: dvwa
         image: vulnerables/web-dvwa
         state: started
+        log_driver: awslogs
+        log_options:
+          awslogs-group: dvwa-logs
+          awslogs-region: us-east-1
         published_ports:
           - "80:80"
+        volumes:
+          - "/home/ec2-user:/var/www/html/config"
+        container_default_behavior: "compatibility"
+
+    - name: Template DVWA config file
+      ansible.builtin.template:
+        src: config.inc.php.j2
+        dest: /home/ec2-user/config.inc.php
+        mode: '0644'
 
 - name: Deploy MySQL Container on MySQL Instance
-  hosts: mysql_instance
+  hosts: mysql_group
   become: true
   vars:
     ansible_python_interpreter: /usr/bin/python3
   tasks:
+    - name: Create MySQL data volume
+      community.docker.docker_volume:
+        volume_name: mysql_data
+        state: present
+
+    - name: Copy SQL script to host machine
+      ansible.builtin.copy:
+        src: dvwa_database_setup.sql
+        dest: /tmp/dvwa_database_setup.sql
+        mode: '0644'
+
     - name: Pull and run MySQL Docker image
       community.docker.docker_container:
         name: mysql
@@ -51,8 +137,18 @@
           - "3306:3306"
         volumes:
           - mysql_data:/var/lib/mysql
+          - /tmp/dvwa_database_setup.sql:/tmp/dvwa_database_setup.sql  # Bind mount the SQL script into the container
 
-- name: Create MySQL data volume
-  community.docker.docker_volume:
-    volume_name: mysql_data
-    state: present
+    - name: Wait for MySQL to be ready (optional)
+      community.docker.docker_container_exec:
+        container: mysql
+        command: "mysqladmin ping -h localhost -u root --password='yourpassword'"
+      register: result
+      until: result is succeeded
+      retries: 5
+      delay: 10
+
+    - name: Execute SQL script inside MySQL container
+      community.docker.docker_container_exec:
+        container: mysql
+        command: "bash -c 'mysql -u root -pyourpassword < /tmp/dvwa_database_setup.sql'"

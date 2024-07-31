@@ -1,17 +1,53 @@
+- name: Add SSH keys of remote hosts to known_hosts
+  hosts: bastion_group,dvwa_group
+  gather_facts: false
+  connection: local
+  tasks:
+    - name: Scan for SSH keys of remote hosts
+      ansible.builtin.command:
+        cmd: ssh-keyscan -H {{ ansible_host }}
+      register: ssh_keyscan_result
+      changed_when: false
+
+    - name: Add SSH keys to known_hosts
+      ansible.builtin.lineinfile:
+        path: "~/.ssh/known_hosts"
+        line: "{{ ssh_keyscan_result.stdout }}"
+        create: false
+        mode: '0644'
+      when: ssh_keyscan_result.stdout is defined
+      changed_when: false
+
 - name: Setup Bastion Host
   hosts: bastion_group
   gather_facts: false
   become: true
+  vars:
+    ansible_python_interpreter: /usr/bin/python3  # Explicitly specify Python interpreter
   tasks:
-    - name: Install Python if not present
-      ansible.builtin.raw: sudo yum -y install python3 python3-pip
+    - name: Install Python pip
+      ansible.builtin.raw: sudo yum -y install python3-pip
       changed_when: false
 
     - name: Install Ansible using pip
-      ansible.builtin.command: sudo pip3 install ansible
+      ansible.builtin.pip:
+        name: ansible
+        state: present
+        executable: pip3  # Use pip3 for Python 3
 
     - name: Install Docker Collection using ansible-galaxy
-      ansible.builtin.command: /usr/local/bin/ansible-galaxy collection install community.docker
+      ansible.builtin.command:
+        cmd: /usr/local/bin/ansible-galaxy collection install community.docker
+
+    - name: Install specific version of pyfiglet
+      ansible.builtin.pip:
+        name: pyfiglet==1.0.2
+        executable: pip3
+
+    - name: Install BeautifulSoup
+      ansible.builtin.pip:
+        name: beautifulsoup4
+        executable: pip3
 
     - name: Install Git
       ansible.builtin.yum:
@@ -20,18 +56,23 @@
 
     - name: Create a directory for playbooks
       ansible.builtin.file:
-        path: '/home/ec2-user/playbooks'
+        path: '/home/ec2-user'
         state: directory
         mode: '0755'
 
-    - name: Copy inventory file to bastion host
-      ansible.builtin.copy:
-        src: inventory.ini
-        dest: /home/ec2-user/playbooks/inventory.ini
-        mode: '0644'
+    - name: Synchronize entire repository to bastion host
+      ansible.posix.synchronize:
+        src: .
+        dest: /home/ec2-user
+        recursive: true
+        delete: false
+        rsync_opts:
+          - "--exclude=.git"
 
-    - name: Copy playbook files to bastion host
-      ansible.builtin.copy:
-        src: infra.yaml
-        dest: /home/ec2-user/playbooks/infra.yaml
-        mode: '0644'
+- name: Output Completion Message
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Congratulatory Message
+      ansible.builtin.debug:
+        msg: "Now SSH into the bastion host using the command 'ssh -A -i ~/.ssh/id_rsa ec2-user@{{ hostvars['bastion']['ansible_host'] }}'. Remember to add your SSH key using 'ssh-add' if you haven't already."

@@ -145,6 +145,10 @@ resource "aws_iam_role_policy" "ec2_policy" {
       {
         Action = [
           "cloudwatch:*",
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents",
+          # Add any other necessary CloudWatch Logs actions
           "s3:*",
           # Other necessary permissions
         ],
@@ -154,7 +158,6 @@ resource "aws_iam_role_policy" "ec2_policy" {
     ]
   })
 }
-
 
 # Attach IAM role to EC2 instance
 resource "aws_iam_instance_profile" "ec2_profile" {
@@ -166,6 +169,7 @@ resource "aws_elb" "example" {
   name      = "example-elb"
   instances = [aws_instance.example["dvwa"].id]
   subnets   = [aws_subnet.public_subnet.id]
+  security_groups = [aws_security_group.elb_sg.id]
 
   listener {
     instance_port     = 80
@@ -186,7 +190,7 @@ resource "aws_elb" "example" {
     healthy_threshold   = 2
     unhealthy_threshold = 2
     timeout             = 3
-    target              = "HTTP:80/"
+    target              = "HTTP:80/login.php"
     interval            = 30
   }
 
@@ -218,10 +222,10 @@ data "aws_ami" "example" {
   most_recent = true
   owners      = ["amazon"] # 'amazon' for Amazon-owned AMIs
 
-  filter {
-    name   = "name"
-    values = ["amzn2-ami-hvm-*-x86_64-gp2"] # Filter for Amazon Linux 2 AMIs
-  }
+  # filter {
+  #   name   = "name"
+  #   values = ["amzn2-ami-hvm-*-x86_64-gp2"] # Filter for Amazon Linux 2 AMIs
+  # }
 
   filter {
     name   = "state"
@@ -249,25 +253,26 @@ resource "aws_key_pair" "common_key" {
   public_key = file("~/.ssh/id_rsa.pub") # Path to your public key file
 }
 
+
 resource "aws_instance" "example" {
   for_each             = var.instances
-  ami                  = data.aws_ami.example.id
+  ami                  = "ami-079db87dc4c10ac91"
   instance_type        = each.value
   key_name             = aws_key_pair.common_key.key_name
   iam_instance_profile = aws_iam_instance_profile.ec2_profile.name
 
-  # Attach to respective private subnets
-  subnet_id = each.key == "dvwa" ? aws_subnet.private_subnet_1.id : aws_subnet.private_subnet_2.id
+  # Attach DVWA to public subnet and MySQL to private subnet
+  subnet_id = each.key == "dvwa" ? aws_subnet.public_subnet.id : aws_subnet.private_subnet_2.id
 
-  # Ensure that the instances are not assigned public IPs
-  associate_public_ip_address = false
+  # Assign public IP for DVWA instance and not for MySQL
+  associate_public_ip_address = each.key == "dvwa" ? true : false
 
   # Use the correct security group for each instance
   vpc_security_group_ids = [each.key == "dvwa" ? aws_security_group.dvwa_sg.id : aws_security_group.mysql_sg.id]
 
   tags = {
     Name = "Instance-${each.key}"
-    Type = each.key  # Include the Type tag
+    Type = each.key
   }
 }
 
@@ -276,7 +281,7 @@ variable "bastion_instance_type" {
 }
 
 resource "aws_instance" "bastion_host" {
-  ami           = data.aws_ami.example.id
+  ami           = "ami-079db87dc4c10ac91"
   instance_type = var.bastion_instance_type
   key_name      = aws_key_pair.common_key.key_name
   subnet_id     = aws_subnet.public_subnet.id  # Place in the public subnet
@@ -287,6 +292,38 @@ resource "aws_instance" "bastion_host" {
 
   tags = {
     Name = "BastionHost"
+  }
+}
+
+resource "aws_security_group" "elb_sg" {
+  name        = "elb-security-group"
+  description = "Security group for ELB"
+  vpc_id      = aws_vpc.main.id
+
+  ingress {
+    from_port   = 80  # HTTP
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 443  # HTTPS
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  # Allow all outbound traffic
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "elb-sg"
   }
 }
 
@@ -313,9 +350,6 @@ resource "aws_security_group" "bastion_sg" {
     Name = "bastion-sg"
   }
 }
-
-
-
 
 resource "aws_security_group" "dvwa_sg" {
   name        = "dvwa-security-group"
@@ -371,6 +405,13 @@ resource "aws_security_group" "mysql_sg" {
     security_groups = [aws_security_group.dvwa_sg.id]
   }
 
+  ingress {
+    from_port       = 22
+    to_port         = 22
+    protocol        = "tcp"
+    security_groups = [aws_security_group.bastion_sg.id]
+  }
+
   # Outbound Rules
   egress {
     from_port   = 0
@@ -384,33 +425,6 @@ resource "aws_security_group" "mysql_sg" {
   }
 }
 
-resource "aws_sns_topic" "alarm_topic" {
-  name = "alarm-topic"
-}
-
-resource "aws_sns_topic_subscription" "alarm_subscription" {
-  topic_arn = aws_sns_topic.alarm_topic.arn
-  protocol  = "email"
-  endpoint  = "example@example.com" # Replace with your email
-}
-
-
-resource "aws_cloudwatch_metric_alarm" "high_cpu_alarm" {
-  alarm_name          = "HighCPUAlarm"
-  comparison_operator = "GreaterThanOrEqualToThreshold"
-  evaluation_periods  = 1
-  metric_name         = "CPUUtilization"
-  namespace           = "AWS/EC2"
-  period              = 300
-  statistic           = "Average"
-  threshold           = 70
-  alarm_actions       = [aws_sns_topic.alarm_topic.arn]
-
-  dimensions = {
-    InstanceId = aws_instance.example["dvwa"].id
-  }
-}
-
 resource "local_file" "ansible_inventory" {
   content = templatefile("${path.module}/inventory.tmpl", {
     bastion_host_public_ip = aws_instance.bastion_host.public_ip,
@@ -418,4 +432,95 @@ resource "local_file" "ansible_inventory" {
     mysql_private_ips      = [for instance in aws_instance.example : instance.private_ip if instance.tags["Type"] == "mysql"]
   })
   filename = "${path.module}/inventory.ini"
+}
+
+resource "aws_cloudwatch_metric_alarm" "sql_injection_alarm" {
+  alarm_name                = "DVWASQLInjectionAlarm"
+  comparison_operator       = "GreaterThanOrEqualToThreshold"
+  evaluation_periods        = "1"
+  metric_name               = "SQLInjectionEvents"
+  namespace                 = "DVWA/Security"
+  period                    = "300"
+  statistic                 = "Sum"
+  threshold                 = "1"
+  alarm_description         = "Alarm when SQL Injection detected"
+  insufficient_data_actions = []
+  alarm_actions             = [aws_sns_topic.security_alerts.arn]
+}
+
+resource "aws_cloudwatch_log_group" "dvwa_logs" {
+  name = "dvwa-logs"
+}
+
+resource "aws_cloudwatch_log_metric_filter" "sql_injection_filter" {
+  name           = "SQLInjectionFilter"
+  log_group_name = aws_cloudwatch_log_group.dvwa_logs.name
+  pattern        = "\"%27+OR+%271%27%3D%271\""
+
+  metric_transformation {
+    name      = "SQLInjectionEvents"
+    namespace = "DVWA/Security"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_log_metric_filter" "xss_filter" {
+  name           = "XSSFilter"
+  pattern        = "\"%3Cscript%3Ealert%28%27XSS%27%29%3B%3C%2Fscript%3E\""
+  log_group_name = aws_cloudwatch_log_group.dvwa_logs.name
+  metric_transformation {
+    name      = "XSSAttackEvents"
+    namespace = "DVWA/Security"
+    value     = "1"
+  }
+}
+
+
+resource "aws_cloudwatch_metric_alarm" "xss_alarm" {
+  alarm_name                = "DVWAXSSAlarm"
+  comparison_operator       = "GreaterThanOrEqualToThreshold"
+  evaluation_periods        = "1"
+  metric_name               = "XSSAttackEvents"
+  namespace                 = "DVWA/Security"
+  period                    = "300"
+  statistic                 = "Sum"
+  threshold                 = "1"
+  alarm_description         = "Alarm when XSS attack detected"
+  insufficient_data_actions = []
+  alarm_actions             = [aws_sns_topic.security_alerts.arn]
+}
+
+resource "aws_cloudwatch_log_metric_filter" "brute_force_filter" {
+  name           = "BruteForceFilter"
+  pattern        = "\"POST /login.php/login.php\" 302"
+  log_group_name = aws_cloudwatch_log_group.dvwa_logs.name
+  metric_transformation {
+    name      = "FailedLoginAttempts"
+    namespace = "DVWA/Security"
+    value     = "1"
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "brute_force_alarm" {
+  alarm_name                = "DVWABruteForceAlarm"
+  comparison_operator       = "GreaterThanOrEqualToThreshold"
+  evaluation_periods        = "1"
+  metric_name               = "FailedLoginAttempts"
+  namespace                 = "DVWA/Security"
+  period                    = "300" # 5 minutes
+  statistic                 = "Sum"
+  threshold                 = "50" # Threshold for failed attempts within 5 minutes
+  alarm_description         = "Alarm when high frequency of failed logins detected"
+  insufficient_data_actions = []
+  alarm_actions             = [aws_sns_topic.security_alerts.arn]
+}
+
+resource "aws_sns_topic" "security_alerts" {
+  name = "security-alerts"
+}
+
+resource "aws_sns_topic_subscription" "security_alerts_subscription" {
+  topic_arn = aws_sns_topic.security_alerts.arn
+  protocol  = "email"
+  endpoint  = "cms553@cornell.edu"
 }
